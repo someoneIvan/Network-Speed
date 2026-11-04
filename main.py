@@ -1,19 +1,29 @@
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import requests
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - not available outside Windows
+    winreg = None
 
 # Timeouts in seconds.
 CONNECT_TIMEOUT = 5
@@ -29,6 +39,10 @@ IP_URL = "https://api.ipify.org"
 GEO_URL = "https://ipwho.is/"
 
 CHUNK_SIZE = 64 * 1024
+
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "NetworkSpeed"
+AUTOSTART_ARG = "--tray"
 
 
 def _measure_download(session):
@@ -126,6 +140,93 @@ def collect_results():
     return {"speed": speed, "ip": ip, "location": location}
 
 
+# --- Autostart (Windows registry) -----------------------------------------
+
+
+def autostart_supported():
+    return winreg is not None and sys.platform == "win32"
+
+
+def startup_command():
+    """Command used by the OS to launch the app hidden in the tray."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" {AUTOSTART_ARG}'
+
+    python = Path(sys.executable)
+    pythonw = python.with_name("pythonw.exe")
+    executable = pythonw if pythonw.exists() else python
+    script = Path(__file__).resolve()
+    return f'"{executable}" "{script}" {AUTOSTART_ARG}'
+
+
+def is_autostart_enabled():
+    if not autostart_supported():
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+            return bool(value)
+    except OSError:
+        return False
+
+
+def set_autostart(enabled):
+    """Add or remove the HKCU Run entry. Returns True on success."""
+    if not autostart_supported():
+        return False
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            if enabled:
+                winreg.SetValueEx(
+                    key, AUTOSTART_NAME, 0, winreg.REG_SZ, startup_command()
+                )
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        return False
+
+
+# --- Icon ------------------------------------------------------------------
+
+
+def _icon_pixmap(size):
+    """Draw a minimal dark disc with a white bolt."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+
+    painter.setBrush(QColor("#16181d"))
+    painter.drawEllipse(0, 0, size, size)
+
+    bolt = [(60, 6), (28, 55), (47, 55), (40, 94), (76, 41), (54, 41)]
+    scale = size / 100
+    painter.setBrush(QColor("#ffffff"))
+    painter.drawPolygon(
+        QPolygonF([QPointF(x * scale, y * scale) for x, y in bolt])
+    )
+    painter.end()
+    return pixmap
+
+
+def create_app_icon():
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128):
+        icon.addPixmap(_icon_pixmap(size))
+    return icon
+
+
+# --- Worker ----------------------------------------------------------------
+
+
 class MeasurementWorker(QThread):
     """Runs the network checks off the UI thread."""
 
@@ -181,6 +282,11 @@ QLabel {
     font-weight: 600;
     color: #16181d;
 }
+#autostart {
+    font-size: 12px;
+    color: #5c626b;
+    spacing: 8px;
+}
 #status {
     font-size: 12px;
     color: #8b909a;
@@ -207,16 +313,25 @@ QPushButton:disabled {
 
 
 class NetworkSpeedWindow(QWidget):
-    def __init__(self):
+    def __init__(self, icon=None):
         super().__init__()
         self._worker = None
+        self._quitting = False
+        self._tray_message_shown = False
+        self.tray = None
+        self.tray_menu = None
+        self.autostart_checkbox = None
+        self.autostart_action = None
 
+        self.icon = icon or create_app_icon()
+        self.setWindowIcon(self.icon)
         self.setObjectName("root")
         self.setWindowTitle("Network Speed")
         self.setFixedWidth(360)
         self.setStyleSheet(STYLESHEET)
 
         self._build_ui()
+        self._setup_tray()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -256,6 +371,14 @@ class NetworkSpeedWindow(QWidget):
         self.location_value = self._add_row(grid, 1, "Расположение")
         grid.setColumnStretch(1, 1)
         root.addWidget(details)
+
+        self.autostart_checkbox = QCheckBox("Запускать при входе в Windows")
+        self.autostart_checkbox.setObjectName("autostart")
+        self.autostart_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.autostart_checkbox.setChecked(is_autostart_enabled())
+        self.autostart_checkbox.setVisible(autostart_supported())
+        self.autostart_checkbox.toggled.connect(self._set_autostart)
+        root.addWidget(self.autostart_checkbox)
 
         self.status = QLabel("Готово к проверке")
         self.status.setObjectName("status")
@@ -297,6 +420,95 @@ class NetworkSpeedWindow(QWidget):
         grid.addWidget(value_label, row, 1)
         return value_label
 
+    # --- Tray -------------------------------------------------------------
+
+    def _setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        self.tray = QSystemTrayIcon(self.icon, self)
+        self.tray.setToolTip("Network Speed")
+
+        self.tray_menu = QMenu()
+        show_action = self.tray_menu.addAction("Показать окно")
+        show_action.triggered.connect(self.show_window)
+        measure_action = self.tray_menu.addAction("Проверить скорость")
+        measure_action.triggered.connect(self._measure_from_tray)
+        self.tray_menu.addSeparator()
+        self.autostart_action = self.tray_menu.addAction("Автозапуск")
+        self.autostart_action.setCheckable(True)
+        self.autostart_action.setChecked(is_autostart_enabled())
+        self.autostart_action.setVisible(autostart_supported())
+        self.autostart_action.toggled.connect(self._set_autostart)
+        self.tray_menu.addSeparator()
+        quit_action = self.tray_menu.addAction("Выход")
+        quit_action.triggered.connect(self.quit_app)
+
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+        # Closing the window should keep the app alive in the tray.
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def _on_tray_activated(self, reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.show_window()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _measure_from_tray(self):
+        self.show_window()
+        self.start_measurement()
+
+    def closeEvent(self, event):
+        if self._quitting or self.tray is None:
+            event.accept()
+            return
+        event.ignore()
+        self.hide()
+        if not self._tray_message_shown:
+            self.tray.showMessage(
+                "Network Speed",
+                "Приложение свёрнуто в трей и продолжает работать.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2500,
+            )
+            self._tray_message_shown = True
+
+    # --- Autostart --------------------------------------------------------
+
+    def _set_autostart(self, enabled):
+        if not autostart_supported():
+            return
+        if set_autostart(enabled):
+            self._sync_autostart_controls(enabled)
+            if not (self._worker is not None and self._worker.isRunning()):
+                self.status.setStyleSheet("")
+                self.status.setText(
+                    "Автозапуск включён" if enabled else "Автозапуск выключен"
+                )
+        else:
+            self._sync_autostart_controls(is_autostart_enabled())
+            self.status.setStyleSheet("color: #d9534f;")
+            self.status.setText("Не удалось изменить автозапуск")
+
+    def _sync_autostart_controls(self, enabled):
+        for widget in (self.autostart_checkbox, self.autostart_action):
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            widget.setChecked(enabled)
+            widget.blockSignals(False)
+
+    # --- Measurement ------------------------------------------------------
+
     def start_measurement(self):
         if self._worker is not None and self._worker.isRunning():
             return
@@ -305,6 +517,8 @@ class NetworkSpeedWindow(QWidget):
         self.button.setText("Измерение…")
         self.status.setStyleSheet("")
         self.status.setText("Измерение скорости и сбор данных…")
+        if self.tray is not None:
+            self.tray.setToolTip("Network Speed — измерение…")
         for label in (
             self.download_value,
             self.upload_value,
@@ -324,17 +538,34 @@ class NetworkSpeedWindow(QWidget):
             self.download_value.setText(f"{download_speed:.2f}")
             self.upload_value.setText(f"{upload_speed:.2f}")
             self.status.setText("Проверка завершена")
+            if self.tray is not None:
+                self.tray.setToolTip(
+                    f"Network Speed — ↓ {download_speed:.2f} "
+                    f"↑ {upload_speed:.2f} Mbit/s"
+                )
         else:
             self.download_value.setText("—")
             self.upload_value.setText("—")
             self.status.setStyleSheet("color: #d9534f;")
             self.status.setText(f"Не удалось измерить скорость: {speed}")
+            if self.tray is not None:
+                self.tray.setToolTip("Network Speed — ошибка измерения")
 
         self.ip_value.setText(str(results.get("ip", "—")))
         self.location_value.setText(str(results.get("location", "—")))
 
         self.button.setEnabled(True)
         self.button.setText("Проверить скорость")
+
+    def quit_app(self):
+        self._quitting = True
+        if self._worker is not None and self._worker.isRunning():
+            if not self._worker.wait(1500):
+                self._worker.terminate()
+                self._worker.wait()
+        if self.tray is not None:
+            self.tray.hide()
+        QApplication.instance().quit()
 
 
 def run_cli():
@@ -351,8 +582,15 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Network Speed")
-    window = NetworkSpeedWindow()
-    window.show()
+
+    icon = create_app_icon()
+    app.setWindowIcon(icon)
+
+    window = NetworkSpeedWindow(icon)
+    # Autostart passes --tray so the app boots silently into the tray.
+    if "--tray" not in sys.argv or window.tray is None:
+        window.show()
+
     sys.exit(app.exec())
 
 
