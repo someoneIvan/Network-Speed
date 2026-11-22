@@ -85,13 +85,19 @@ QMenu {
     color: #16181d;
     border: 1px solid #e3e6ea;
 }
+QMenu::item {
+    padding: 4px 24px 4px 12px;
+}
+QMenu::indicator {
+    left: 6px;
+}
 QMenu::item:selected {
     background: #edeff2;
 }
 QMenu::separator {
     height: 1px;
     background: #edeff2;
-    margin: 4px 8px;
+    margin: 0px 8px;
 }
 #themeButton {
     background: transparent;
@@ -186,13 +192,19 @@ QMenu {
     color: #f5f7fa;
     border: 1px solid #2a2f3a;
 }
+QMenu::item {
+    padding: 4px 24px 4px 12px;
+}
+QMenu::indicator {
+    left: 6px;
+}
 QMenu::item:selected {
     background: #2a2f3a;
 }
 QMenu::separator {
     height: 1px;
     background: #2a2f3a;
-    margin: 4px 8px;
+    margin: 0px 8px;
 }
 #themeButton {
     background: transparent;
@@ -214,6 +226,12 @@ QMenu {
     color: #16181d;
     border: 1px solid #e3e6ea;
 }
+QMenu::item {
+    padding: 4px 24px 4px 12px;
+}
+QMenu::indicator {
+    left: 6px;
+}
 QMenu::item:selected {
     background: #edeff2;
     color: #16181d;
@@ -221,7 +239,7 @@ QMenu::item:selected {
 QMenu::separator {
     height: 1px;
     background: #edeff2;
-    margin: 4px 8px;
+    margin: 0px 8px;
 }
 """
 
@@ -231,6 +249,12 @@ QMenu {
     color: #f5f7fa;
     border: 1px solid #2a2f3a;
 }
+QMenu::item {
+    padding: 4px 24px 4px 12px;
+}
+QMenu::indicator {
+    left: 6px;
+}
 QMenu::item:selected {
     background: #2a2f3a;
     color: #f5f7fa;
@@ -238,7 +262,7 @@ QMenu::item:selected {
 QMenu::separator {
     height: 1px;
     background: #2a2f3a;
-    margin: 4px 8px;
+    margin: 0px 8px;
 }
 """
 
