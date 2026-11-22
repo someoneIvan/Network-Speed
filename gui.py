@@ -3,7 +3,16 @@
 import math
 import sys
 
-from PyQt6.QtCore import QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -25,6 +34,8 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QSizePolicy,
+    QStyle,
+    QStyleOptionButton,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -50,7 +61,7 @@ TRANSLATIONS = {
         "subtitle": "Internet connection speed test",
         "download": "Download ↓",
         "upload": "Upload ↑",
-        "ip": "IP address",
+        "ip": "IP-address",
         "provider": "Provider",
         "location": "Location",
         "ping": "Ping",
@@ -183,14 +194,19 @@ def _theme_icon_pixmap(dark):
 
     center = QPointF(size / 2, size / 2)
     if dark:
-        # Sun: click to switch to the light theme.
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(color, size * 0.055))
+        # Filled sun so it reads as light as the language button text.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
         radius = size * 0.16
         painter.drawEllipse(center, radius, radius)
+
+        pen = QPen(color, size * 0.075)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         for index in range(8):
             angle = index * math.pi / 4
-            inner = size * 0.28
+            inner = size * 0.26
             outer = size * 0.39
             painter.drawLine(
                 QPointF(
@@ -473,6 +489,123 @@ class FitLabel(QLabel):
         painter.end()
 
 
+class ThemedCheckBox(QCheckBox):
+    """Checkbox with a thick, high-contrast mark in both themes."""
+
+    CHECKED_COLOR = "#d9534f"
+    DARK_CHECK_COLOR = "#0f1115"
+    LIGHT_CHECK_COLOR = "#f4f5f7"
+    DARK_BORDER = "#4a5160"
+    LIGHT_BORDER = "#8b909a"
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._dark = True
+        self.set_dark(True)
+
+    def set_dark(self, dark):
+        self._dark = bool(dark)
+        palette = self.palette()
+        palette.setColor(
+            QPalette.ColorRole.WindowText,
+            QColor("#c3c9d4") if self._dark else QColor("#5c626b"),
+        )
+        self.setPalette(palette)
+        self.update()
+
+    def paintEvent(self, event):
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        indicator_w = (
+            self.style().pixelMetric(
+                QStyle.PixelMetric.PM_IndicatorWidth, opt, self
+            )
+            or 16
+        )
+        indicator_h = (
+            self.style().pixelMetric(
+                QStyle.PixelMetric.PM_IndicatorHeight, opt, self
+            )
+            or 16
+        )
+        spacing = (
+            self.style().pixelMetric(
+                QStyle.PixelMetric.PM_CheckBoxLabelSpacing, opt, self
+            )
+            or 8
+        )
+        indicator = QRect(
+            self.rect().left() + 4,
+            self.rect().center().y() - indicator_h // 2,
+            indicator_w,
+            indicator_h,
+        )
+
+        radius = max(3.0, indicator.width() * 0.24)
+        if self.isChecked():
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(self.CHECKED_COLOR))
+            painter.drawRoundedRect(QRectF(indicator), radius, radius)
+
+            check_color = QColor(
+                self.DARK_CHECK_COLOR
+                if self._dark
+                else self.LIGHT_CHECK_COLOR
+            )
+            pen = QPen(check_color, max(2.4, indicator.width() * 0.19))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            x, y = indicator.x(), indicator.y()
+            w, h = indicator.width(), indicator.height()
+            start = QPointF(x + w * 0.22, y + h * 0.52)
+            corner = QPointF(x + w * 0.40, y + h * 0.70)
+            end = QPointF(x + w * 0.78, y + h * 0.30)
+            painter.drawLine(start, corner)
+            painter.drawLine(corner, end)
+        else:
+            border = QColor(
+                self.DARK_BORDER if self._dark else self.LIGHT_BORDER
+            )
+            painter.setPen(QPen(border, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(
+                QRectF(indicator.adjusted(1, 1, -1, -1)), radius, radius
+            )
+
+        text_rect = QRect(
+            indicator.right() + spacing,
+            self.rect().top(),
+            max(0, self.rect().right() - indicator.right() - spacing),
+            self.rect().height(),
+        )
+        painter.setFont(self.font())
+        group = (
+            QPalette.ColorGroup.Normal
+            if self.isEnabled()
+            else QPalette.ColorGroup.Disabled
+        )
+        painter.setPen(self.palette().color(group, QPalette.ColorRole.WindowText))
+        painter.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self.text(),
+        )
+
+        if self.hasFocus():
+            painter.setPen(QPen(QColor("#3b82f6"), 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+        painter.end()
+
+
 class MeasurementWorker(QThread):
     """Runs the network checks off the UI thread."""
 
@@ -612,10 +745,11 @@ class NetworkSpeedWindow(QWidget):
         if self.language_button is None:
             return
         self.language_button.setText(self._lang.upper())
+        # The tooltip is written in the language the interface will switch to.
         self.language_button.setToolTip(
-            self.tr("language_to_russian")
+            TRANSLATIONS["ru"]["language_to_russian"]
             if self._lang == "en"
-            else self.tr("language_to_english")
+            else TRANSLATIONS["en"]["language_to_english"]
         )
         self.language_button.setAccessibleName(
             self.language_button.toolTip()
@@ -730,6 +864,8 @@ class NetworkSpeedWindow(QWidget):
         self._apply_dark_titlebar()
         self._apply_tray_menu_theme()
         self._update_theme_button()
+        if self.autostart_checkbox is not None:
+            self.autostart_checkbox.set_dark(self._dark)
         if self.location_value is not None:
             self.location_value.refresh()
         self._ensure_height()
@@ -824,7 +960,7 @@ class NetworkSpeedWindow(QWidget):
         grid.setColumnStretch(1, 1)
         root.addWidget(details)
 
-        self.autostart_checkbox = QCheckBox(self.tr("autostart"))
+        self.autostart_checkbox = ThemedCheckBox(self.tr("autostart"))
         self.autostart_checkbox.setObjectName("autostart")
         self.autostart_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.autostart_checkbox.setChecked(self._autostart_on)
@@ -869,7 +1005,6 @@ class NetworkSpeedWindow(QWidget):
         key_label.setObjectName("rowKey")
         # Keep the key column from squeezing the value column on wide fonts.
         key_label.setMaximumWidth(110)
-        key_label.setWordWrap(True)
         value_label = FitLabel(EMPTY_VALUE) if fit else QLabel(EMPTY_VALUE)
         value_label.setObjectName("rowValue")
         value_label.setAlignment(
