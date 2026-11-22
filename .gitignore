@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 pyproject.toml
 uv.lock
+tests/
