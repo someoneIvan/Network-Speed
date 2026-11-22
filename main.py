@@ -27,15 +27,23 @@ def _set_windows_app_id():
 
 def run_cli():
     results = collect_results()
-    speed = results["speed"]
-    if isinstance(speed, tuple):
+    speed = results.get("speed")
+    if isinstance(speed, tuple) and len(speed) == 2:
         download_speed, upload_speed = speed
         print(f"Download: {download_speed:.2f} Mbit/s")
         print(f"Upload: {upload_speed:.2f} Mbit/s")
     else:
         print(f"Speed: {speed}")
-    print(f"IP: {results['ip']}")
-    print(f"Location: {results['location']}")
+
+    ping = results.get("ping")
+    if isinstance(ping, (int, float)):
+        print(f"Ping: {ping:.0f} ms")
+    else:
+        print(f"Ping: {ping or '—'}")
+
+    print(f"Provider: {results.get('provider') or '—'}")
+    print(f"IP: {results.get('ip') or '—'}")
+    print(f"Location: {results.get('location') or '—'}")
 
 
 def main():

@@ -1,5 +1,6 @@
 """Network measurements and lookup helpers."""
 
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,6 +19,10 @@ UPLOAD_BYTES = 10_000_000
 
 IP_URL = "https://api.ipify.org"
 GEO_URL = "https://ipwho.is/"
+
+PING_URL = "https://speed.cloudflare.com/__down"
+PING_SAMPLES = 5
+PING_BYTES = 0
 
 CHUNK_SIZE = 64 * 1024
 
@@ -82,14 +87,61 @@ def _measure_upload(session, cancel=None):
     return _to_mbit(UPLOAD_BYTES, elapsed, "upload")
 
 
+def measure_ping(session=None, samples=PING_SAMPLES, cancel=None):
+    """Return the median round-trip time in milliseconds.
+
+    A warm-up request is made first so the TLS handshake is not counted. The
+    remaining samples are sent over the same connection.
+    """
+    _check_cancelled(cancel)
+    own_session = session is None
+    if own_session:
+        session = requests.Session()
+
+    try:
+        with session.get(
+            PING_URL,
+            params={"bytes": PING_BYTES},
+            timeout=TIMEOUT,
+        ) as response:
+            response.raise_for_status()
+
+        timings = []
+        for _ in range(samples):
+            _check_cancelled(cancel)
+            started = time.perf_counter()
+            with session.get(
+                PING_URL,
+                params={"bytes": PING_BYTES},
+                timeout=TIMEOUT,
+            ) as response:
+                response.raise_for_status()
+            timings.append((time.perf_counter() - started) * 1000)
+
+        if not timings:
+            raise RuntimeError("ping measurement produced no samples")
+        return statistics.median(timings)
+    finally:
+        if own_session:
+            session.close()
+
+
 def measure_speed(cancel=None):
-    """Return (download, upload) in Mbit/s. Raises on failure."""
-    # One session for both phases reuses the TLS connection to Cloudflare
-    # instead of paying for a second handshake before the upload.
+    """Return (download, upload, ping). Speeds are Mbit/s, ping is in ms."""
+    # One session for all phases reuses the TLS connection to Cloudflare
+    # instead of paying for a new handshake before every request.
     with requests.Session() as session:
+        try:
+            ping = measure_ping(session, cancel=cancel)
+        except MeasurementCancelled:
+            raise
+        except requests.RequestException as exc:
+            # A failed ping must not abort the speed measurement.
+            ping = _error_text(exc)
+
         download_speed = _measure_download(session, cancel)
         upload_speed = _measure_upload(session, cancel)
-    return download_speed, upload_speed
+    return download_speed, upload_speed, ping
 
 
 def get_ip(cancel=None):
@@ -100,15 +152,37 @@ def get_ip(cancel=None):
         return _error_text(exc)
 
 
-def get_location(cancel=None):
+def get_geo(cancel=None):
+    """Return (location, provider) from the geolocation service."""
     _check_cancelled(cancel)
     try:
         data = _get(GEO_URL).json()
         if not data.get("success"):
-            return "Unknown"
-        return f"{data.get('city') or 'Unknown'}, {data.get('country') or 'Unknown'}"
+            return "Unknown", "Unknown"
+
+        location = (
+            f"{data.get('city') or 'Unknown'}, "
+            f"{data.get('country') or 'Unknown'}"
+        )
+        connection = data.get("connection")
+        if not isinstance(connection, dict):
+            connection = {}
+        provider = (
+            connection.get("isp")
+            or connection.get("org")
+            or "Unknown"
+        )
+        return location, provider
     except (requests.RequestException, ValueError) as exc:
-        return _error_text(exc, "Unknown")
+        return _error_text(exc, "Unknown"), "Unknown"
+
+
+def get_location(cancel=None):
+    return get_geo(cancel)[0]
+
+
+def get_provider(cancel=None):
+    return get_geo(cancel)[1]
 
 
 def collect_results(cancel=None):
@@ -116,13 +190,27 @@ def collect_results(cancel=None):
     with ThreadPoolExecutor(max_workers=3) as executor:
         speed_future = executor.submit(measure_speed, cancel)
         ip_future = executor.submit(get_ip, cancel)
-        location_future = executor.submit(get_location, cancel)
+        geo_future = executor.submit(get_geo, cancel)
 
+        ping = "Unavailable"
         try:
-            speed = speed_future.result()
+            speed_result = speed_future.result()
         except (requests.RequestException, RuntimeError) as exc:
             speed = _error_text(exc)
-        ip = ip_future.result()
-        location = location_future.result()
+        else:
+            if isinstance(speed_result, tuple) and len(speed_result) == 3:
+                download, upload, ping = speed_result
+                speed = (download, upload)
+            else:
+                speed = speed_result
 
-    return {"speed": speed, "ip": ip, "location": location}
+        ip = ip_future.result()
+        location, provider = geo_future.result()
+
+    return {
+        "speed": speed,
+        "ping": ping,
+        "provider": provider,
+        "ip": ip,
+        "location": location,
+    }

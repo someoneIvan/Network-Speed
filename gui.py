@@ -451,6 +451,8 @@ class NetworkSpeedWindow(QWidget):
         self.theme_button = None
         self.metrics_card = None
         self.details_card = None
+        self.ping_value = None
+        self.provider_value = None
 
         self.icon = icon or create_app_icon()
         self.setWindowIcon(self.icon)
@@ -645,9 +647,13 @@ class NetworkSpeedWindow(QWidget):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
         self.ip_value = self._add_row(grid, 0, "IP-адрес")
-        self.location_value = self._add_row(
-            grid, 1, "Расположение", fit=True
+        self.provider_value = self._add_row(
+            grid, 1, "Провайдер", fit=True
         )
+        self.location_value = self._add_row(
+            grid, 2, "Расположение", fit=True
+        )
+        self.ping_value = self._add_row(grid, 3, "Пинг")
         grid.setColumnStretch(1, 1)
         root.addWidget(details)
 
@@ -823,7 +829,9 @@ class NetworkSpeedWindow(QWidget):
             self.download_value,
             self.upload_value,
             self.ip_value,
+            self.provider_value,
             self.location_value,
+            self.ping_value,
         ):
             label.setText(EMPTY_VALUE)
 
@@ -843,21 +851,36 @@ class NetworkSpeedWindow(QWidget):
 
     def show_results(self, results):
         speed = results.get("speed")
-        if isinstance(speed, tuple):
+        ping = results.get("ping")
+        if isinstance(speed, tuple) and len(speed) == 2:
             download_speed, upload_speed = speed
             self.download_value.setText(f"{download_speed:.2f}")
             self.upload_value.setText(f"{upload_speed:.2f}")
             self._set_status("Проверка завершена")
-            self._set_tray_tooltip(
+
+            tooltip = (
                 f"↓ {download_speed:.2f} ↑ {upload_speed:.2f} Mbit/s"
             )
+            if isinstance(ping, (int, float)):
+                tooltip += f" · {ping:.0f} ms"
+            self._set_tray_tooltip(tooltip)
         else:
             self._clear_values()
             self._set_status(f"Не удалось измерить скорость: {speed}", error=True)
             self._set_tray_tooltip("ошибка измерения")
 
-        self.ip_value.setText(str(results.get("ip", EMPTY_VALUE)))
-        self.location_value.setText(str(results.get("location", EMPTY_VALUE)))
+        self.ip_value.setText(str(results.get("ip") or EMPTY_VALUE))
+        self.provider_value.setText(
+            str(results.get("provider") or EMPTY_VALUE)
+        )
+        self.location_value.setText(
+            str(results.get("location") or EMPTY_VALUE)
+        )
+
+        if isinstance(ping, (int, float)):
+            self.ping_value.setText(f"{ping:.0f} ms")
+        else:
+            self.ping_value.setText(str(ping) if ping else EMPTY_VALUE)
 
         self.button.setEnabled(True)
         self.button.setText(MEASURE_TEXT)
