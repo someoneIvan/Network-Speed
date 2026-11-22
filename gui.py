@@ -6,6 +6,8 @@ import sys
 from PyQt6.QtCore import QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
+    QFont,
+    QFontMetrics,
     QIcon,
     QPainter,
     QPalette,
@@ -43,6 +45,11 @@ EMPTY_VALUE = "—"
 MEASURE_TEXT = "Проверить скорость"
 MEASURE_BUSY_TEXT = "Измерение…"
 MEASURE_TOOLTIP = "измерение…"
+
+# Long locations shrink their font and wrap to at most four lines.
+LOCATION_MAX_LINES = 4
+LOCATION_MIN_FONT_SIZE = 10
+LOCATION_FALLBACK_WIDTH = 128
 
 # The icon is rendered once at a large size and smoothly downsampled to every
 # size Qt asks for. Rendering each small size directly makes the bolt look
@@ -165,6 +172,241 @@ def _theme_icon(dark):
     return icon
 
 
+def _wrap_text_lines(text, font_metrics, max_width, max_lines):
+    """Wrap text into at most max_lines, returning (lines, truncated)."""
+    words = text.split()
+    if not words:
+        return [""], False
+
+    lines = []
+    current = ""
+
+    for index, word in enumerate(words):
+        has_more = index < len(words) - 1
+        candidate = word if not current else f"{current} {word}"
+        if font_metrics.horizontalAdvance(candidate) <= max_width:
+            current = candidate
+            continue
+
+        if current:
+            lines.append(current)
+            current = ""
+            if len(lines) >= max_lines:
+                return lines, True
+
+        # Place the word, breaking it when a single word is wider than the line.
+        while font_metrics.horizontalAdvance(word) > max_width:
+            cut = len(word)
+            while (
+                cut > 1
+                and font_metrics.horizontalAdvance(word[:cut]) > max_width
+            ):
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+            if len(lines) >= max_lines:
+                return lines, bool(word) or has_more
+
+        if word:
+            current = word
+
+    if current:
+        if len(lines) >= max_lines:
+            return lines, True
+        lines.append(current)
+
+    return lines, False
+
+
+def _elide_last_line(lines, font_metrics, max_width):
+    """Add an ellipsis to the last line, removing words/chars as needed."""
+    if not lines:
+        return ["…"]
+    last = lines[-1]
+    while last and font_metrics.horizontalAdvance(last + "…") > max_width:
+        if " " in last:
+            last = last.rsplit(" ", 1)[0]
+        else:
+            last = last[:-1]
+    return lines[:-1] + [last + "…"]
+
+
+def _line_x(index, line, first_x, first_advance, metrics, width):
+    """Right-align the first line and centre the following lines below it."""
+    if index == 0:
+        return first_x
+    advance = metrics.horizontalAdvance(line)
+    x = first_x + first_advance / 2 - advance / 2
+    return max(0, min(x, width - advance))
+
+
+class FitLabel(QLabel):
+    """Label that shrinks its font and wraps to at most four lines.
+
+    The first line is right-aligned. Every following line is centred below the
+    first line. If even the smallest font needs more than four lines, the last
+    visible line is shortened with an ellipsis.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self._lines = [""]
+        self._font = self.font()
+        self._line_height = 0
+        self._text_height = 0
+        self._last_width = -1
+        self._last_text = None
+        self._last_font_key = None
+        self.setWordWrap(True)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = text
+        super().setText(text)
+        self.setToolTip(text)
+        self._refit()
+
+    def refresh(self):
+        self._last_width = -1
+        self._refit()
+
+    def _base_font_size(self):
+        size = self.font().pixelSize()
+        if size <= 0:
+            size = self.font().pointSize()
+        if size <= 0:
+            size = 13
+        return size
+
+    def _font_key(self):
+        font = self.font()
+        return (font.family(), int(font.weight()), self._base_font_size())
+
+    def _compute_layout(self, width):
+        base_font = QFont(self.font())
+        base_size = self._base_font_size()
+        min_size = min(LOCATION_MIN_FONT_SIZE, base_size)
+        max_size = max(LOCATION_MIN_FONT_SIZE, base_size)
+
+        if not self._full_text:
+            font = QFont(base_font)
+            font.setPixelSize(base_size)
+            return font, [""], False
+
+        for size in range(max_size, min_size - 1, -1):
+            font = QFont(base_font)
+            font.setPixelSize(size)
+            metrics = QFontMetrics(font)
+            lines, truncated = _wrap_text_lines(
+                self._full_text, metrics, width, LOCATION_MAX_LINES
+            )
+            if truncated:
+                continue
+            # The more lines the text needs, the smaller the font should be:
+            # 1 line -> max size, 2 -> -1 px, 3 -> -2 px, 4 -> -3 px.
+            desired = max(
+                min_size,
+                max_size - (min(len(lines), LOCATION_MAX_LINES) - 1),
+            )
+            if size <= desired:
+                return font, lines, False
+
+        # Even the smallest font does not fit: keep four lines and elide.
+        font = QFont(base_font)
+        font.setPixelSize(min_size)
+        metrics = QFontMetrics(font)
+        lines, truncated = _wrap_text_lines(
+            self._full_text, metrics, width, LOCATION_MAX_LINES
+        )
+        if truncated:
+            lines = _elide_last_line(lines, metrics, width)
+        return font, lines, True
+
+    def _refit(self):
+        width = self.width()
+        if width <= 1:
+            width = LOCATION_FALLBACK_WIDTH
+        font_key = self._font_key()
+        if (
+            width == self._last_width
+            and self._full_text == self._last_text
+            and font_key == self._last_font_key
+        ):
+            return
+
+        font, lines, _ = self._compute_layout(width)
+        self._font = font
+        self._lines = lines
+        self._line_height = QFontMetrics(font).height()
+        self._text_height = self._line_height * max(1, len(lines))
+        self._last_width = width
+        self._last_text = self._full_text
+        self._last_font_key = font_key
+
+        if self.minimumHeight() != self._text_height:
+            self.setMinimumHeight(self._text_height)
+        self.updateGeometry()
+        self.update()
+
+    def sizeHint(self):
+        return QSize(
+            max(self.width(), LOCATION_FALLBACK_WIDTH),
+            max(self._text_height, self._line_height),
+        )
+
+    def minimumSizeHint(self):
+        return QSize(0, max(self._text_height, self._line_height))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        if width <= 1:
+            width = LOCATION_FALLBACK_WIDTH
+        font, lines, _ = self._compute_layout(width)
+        return QFontMetrics(font).height() * max(1, len(lines))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refit()
+
+    def paintEvent(self, event):
+        if self._full_text and not self._lines:
+            self._refit()
+        if not self._lines:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(self._font)
+        metrics = QFontMetrics(self._font)
+
+        group = (
+            QPalette.ColorGroup.Normal
+            if self.isEnabled()
+            else QPalette.ColorGroup.Disabled
+        )
+        painter.setPen(self.palette().color(group, QPalette.ColorRole.WindowText))
+
+        line_height = metrics.height()
+        total_height = line_height * len(self._lines)
+        y = (self.height() - total_height) / 2
+
+        first = self._lines[0]
+        first_advance = metrics.horizontalAdvance(first)
+        first_x = self.width() - first_advance
+
+        for index, line in enumerate(self._lines):
+            x = _line_x(
+                index, line, first_x, first_advance, metrics, self.width()
+            )
+            baseline = y + metrics.ascent() + index * line_height
+            painter.drawText(QPointF(x, baseline), line)
+
+        painter.end()
+
+
 class MeasurementWorker(QThread):
     """Runs the network checks off the UI thread."""
 
@@ -207,6 +449,8 @@ class NetworkSpeedWindow(QWidget):
         self.autostart_action = None
         self.theme_action = None
         self.theme_button = None
+        self.metrics_card = None
+        self.details_card = None
 
         self.icon = icon or create_app_icon()
         self.setWindowIcon(self.icon)
@@ -325,6 +569,9 @@ class NetworkSpeedWindow(QWidget):
         self._apply_dark_titlebar()
         self._apply_tray_menu_theme()
         self._update_theme_button()
+        if self.location_value is not None:
+            self.location_value.refresh()
+        self._ensure_height()
         if self._status_is_error:
             self._set_status(self.status.text(), error=True)
         if self.theme_action is not None:
@@ -336,6 +583,8 @@ class NetworkSpeedWindow(QWidget):
         super().showEvent(event)
         # The native title bar exists only after the window is shown.
         self._apply_dark_titlebar()
+        # Re-measure after the first real layout so wrapped text gets enough height.
+        QTimer.singleShot(0, self._ensure_height)
 
     # --- Layout -----------------------------------------------------------
 
@@ -376,6 +625,7 @@ class NetworkSpeedWindow(QWidget):
 
         # Speed card: download | upload
         metrics = self._card()
+        self.metrics_card = metrics
         metrics_row = QHBoxLayout(metrics)
         metrics_row.setContentsMargins(20, 18, 20, 18)
         metrics_row.setSpacing(18)
@@ -389,12 +639,15 @@ class NetworkSpeedWindow(QWidget):
 
         # Details card: IP + location
         details = self._card()
+        self.details_card = details
         grid = QGridLayout(details)
         grid.setContentsMargins(20, 14, 20, 14)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
         self.ip_value = self._add_row(grid, 0, "IP-адрес")
-        self.location_value = self._add_row(grid, 1, "Расположение")
+        self.location_value = self._add_row(
+            grid, 1, "Расположение", fit=True
+        )
         grid.setColumnStretch(1, 1)
         root.addWidget(details)
 
@@ -432,10 +685,13 @@ class NetworkSpeedWindow(QWidget):
         parent_layout.addLayout(column, 1)
         return value
 
-    def _add_row(self, grid, row, key):
+    def _add_row(self, grid, row, key, fit=False):
         key_label = QLabel(key)
         key_label.setObjectName("rowKey")
-        value_label = QLabel(EMPTY_VALUE)
+        # Keep the key column from squeezing the value column on wide fonts.
+        key_label.setMaximumWidth(110)
+        key_label.setWordWrap(True)
+        value_label = FitLabel(EMPTY_VALUE) if fit else QLabel(EMPTY_VALUE)
         value_label.setObjectName("rowValue")
         value_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -447,6 +703,18 @@ class NetworkSpeedWindow(QWidget):
         grid.addWidget(key_label, row, 0)
         grid.addWidget(value_label, row, 1)
         return value_label
+
+    def _ensure_height(self):
+        """Grow the window when wrapped content needs more vertical space."""
+        for card in (self.metrics_card, self.details_card):
+            if card is None:
+                continue
+            needed = card.sizeHint().height()
+            if card.minimumHeight() != needed:
+                card.setMinimumHeight(needed)
+        required = self.sizeHint().height()
+        if self.height() < required:
+            self.resize(self.width(), required)
 
     # --- Tray -------------------------------------------------------------
 
@@ -593,6 +861,7 @@ class NetworkSpeedWindow(QWidget):
 
         self.button.setEnabled(True)
         self.button.setText(MEASURE_TEXT)
+        self._ensure_height()
 
     def quit_app(self):
         if self._quitting:
