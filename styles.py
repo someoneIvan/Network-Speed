@@ -99,6 +99,21 @@ QMenu::separator {
     background: #edeff2;
     margin: 0px 8px;
 }
+#languageButton {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+    color: #16181d;
+    font-size: 12px;
+    font-weight: 600;
+}
+#languageButton:hover {
+    background: #edeff2;
+}
+#languageButton:pressed {
+    background: #e3e6ea;
+}
 #themeButton {
     background: transparent;
     border: none;
@@ -205,6 +220,21 @@ QMenu::separator {
     height: 1px;
     background: #2a2f3a;
     margin: 0px 8px;
+}
+#languageButton {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+    color: #f5f7fa;
+    font-size: 12px;
+    font-weight: 600;
+}
+#languageButton:hover {
+    background: #2a2f3a;
+}
+#languageButton:pressed {
+    background: #343a46;
 }
 #themeButton {
     background: transparent;

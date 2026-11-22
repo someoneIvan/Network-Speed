@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -42,9 +43,74 @@ from styles import (
 
 APP_NAME = "Network Speed"
 EMPTY_VALUE = "—"
-MEASURE_TEXT = "Проверить скорость"
-MEASURE_BUSY_TEXT = "Измерение…"
-MEASURE_TOOLTIP = "измерение…"
+DEFAULT_LANGUAGE = "en"
+
+TRANSLATIONS = {
+    "en": {
+        "subtitle": "Internet connection speed test",
+        "download": "Download ↓",
+        "upload": "Upload ↑",
+        "ip": "IP address",
+        "provider": "Provider",
+        "location": "Location",
+        "ping": "Ping",
+        "autostart": "Launch at Windows startup",
+        "ready": "Ready to test",
+        "measure": "Test speed",
+        "measuring": "Measuring…",
+        "measuring_status": "Measuring speed and collecting data…",
+        "complete": "Test complete",
+        "speed_error": "Could not measure speed: {speed}",
+        "dark_theme": "Dark theme",
+        "autostart_action": "Autostart",
+        "quit": "Quit",
+        "tray_message": "The app is minimized to the tray and keeps running.",
+        "tray_measuring": "measuring…",
+        "tray_error": "measurement error",
+        "autostart_on": "Autostart enabled",
+        "autostart_off": "Autostart disabled",
+        "autostart_error": "Could not change autostart",
+        "theme_to_light": "Switch to light theme",
+        "theme_to_dark": "Switch to dark theme",
+        "language_to_russian": "Switch to Russian",
+        "language_to_english": "Switch to English",
+        "finishing": "Finishing…",
+    },
+    "ru": {
+        "subtitle": "Проверка скорости интернет-соединения",
+        "download": "Загрузка ↓",
+        "upload": "Выгрузка ↑",
+        "ip": "IP-адрес",
+        "provider": "Провайдер",
+        "location": "Расположение",
+        "ping": "Пинг",
+        "autostart": "Запускать при входе в Windows",
+        "ready": "Готово к проверке",
+        "measure": "Проверить скорость",
+        "measuring": "Измерение…",
+        "measuring_status": "Измерение скорости и сбор данных…",
+        "complete": "Проверка завершена",
+        "speed_error": "Не удалось измерить скорость: {speed}",
+        "dark_theme": "Тёмная тема",
+        "autostart_action": "Автозапуск",
+        "quit": "Выход",
+        "tray_message": "Приложение свёрнуто в трей и продолжает работать.",
+        "tray_measuring": "измерение…",
+        "tray_error": "ошибка измерения",
+        "autostart_on": "Автозапуск включён",
+        "autostart_off": "Автозапуск выключен",
+        "autostart_error": "Не удалось изменить автозапуск",
+        "theme_to_light": "Включить светлую тему",
+        "theme_to_dark": "Включить тёмную тему",
+        "language_to_russian": "Включить русский язык",
+        "language_to_english": "Включить английский язык",
+        "finishing": "Завершение…",
+    },
+}
+
+MEASURE_TEXT = TRANSLATIONS[DEFAULT_LANGUAGE]["measure"]
+MEASURE_BUSY_TEXT = TRANSLATIONS[DEFAULT_LANGUAGE]["measuring"]
+MEASURE_TOOLTIP = TRANSLATIONS[DEFAULT_LANGUAGE]["tray_measuring"]
 
 # Long locations shrink their font and wrap to at most four lines.
 LOCATION_MAX_LINES = 4
@@ -442,17 +508,30 @@ class NetworkSpeedWindow(QWidget):
         self._tray_message_shown = False
         self._autostart_on = is_autostart_enabled()
         self._dark = True
+        self._lang = DEFAULT_LANGUAGE
         self._status_is_error = False
+        self._status_key = "ready"
+        self._status_params = {}
+        self._last_speed = None
+        self._tray_error = False
         self.tray = None
         self.tray_menu = None
         self.autostart_checkbox = None
         self.autostart_action = None
+        self.measure_action = None
+        self.quit_action = None
         self.theme_action = None
         self.theme_button = None
+        self.language_button = None
         self.metrics_card = None
         self.details_card = None
         self.ping_value = None
         self.provider_value = None
+        self.subtitle_label = None
+        self.metric_name_labels = []
+        self.metric_name_keys = []
+        self.row_key_labels = []
+        self.row_key_keys = []
 
         self.icon = icon or create_app_icon()
         self.setWindowIcon(self.icon)
@@ -465,6 +544,7 @@ class NetworkSpeedWindow(QWidget):
         self._build_ui()
         self._setup_tray()
         self._update_theme_button()
+        self._update_language_button()
         self._apply_dark_titlebar()
 
     # --- Theme ------------------------------------------------------------
@@ -509,9 +589,88 @@ class NetworkSpeedWindow(QWidget):
             return
         self.theme_button.setIcon(_theme_icon(self._dark))
         self.theme_button.setToolTip(
-            "Включить светлую тему" if self._dark else "Включить тёмную тему"
+            self.tr("theme_to_light")
+            if self._dark
+            else self.tr("theme_to_dark")
         )
         self.theme_button.setAccessibleName(self.theme_button.toolTip())
+
+    # --- Language ---------------------------------------------------------
+
+    def tr(self, key, **params):
+        text = TRANSLATIONS.get(self._lang, TRANSLATIONS[DEFAULT_LANGUAGE]).get(
+            key, key
+        )
+        if params:
+            return text.format(**params)
+        return text
+
+    def _toggle_language(self):
+        self.set_language("ru" if self._lang == "en" else "en")
+
+    def _update_language_button(self):
+        if self.language_button is None:
+            return
+        self.language_button.setText(self._lang.upper())
+        self.language_button.setToolTip(
+            self.tr("language_to_russian")
+            if self._lang == "en"
+            else self.tr("language_to_english")
+        )
+        self.language_button.setAccessibleName(
+            self.language_button.toolTip()
+        )
+
+    def _update_measure_button(self):
+        if self.button is None:
+            return
+        running = self._worker is not None and self._worker.isRunning()
+        self.button.setText(
+            self.tr("measuring") if running else self.tr("measure")
+        )
+
+    def set_language(self, lang):
+        if lang not in TRANSLATIONS or lang == self._lang:
+            return
+        self._lang = lang
+        self._retranslate_ui()
+        self._update_language_button()
+        self._update_theme_button()
+        self._update_tray_tooltip()
+        self._ensure_height()
+
+    def _retranslate_ui(self):
+        if self.subtitle_label is not None:
+            self.subtitle_label.setText(self.tr("subtitle"))
+
+        for label, key in zip(
+            self.metric_name_labels, self.metric_name_keys
+        ):
+            label.setText(self.tr(key).upper())
+
+        for label, key in zip(self.row_key_labels, self.row_key_keys):
+            label.setText(self.tr(key))
+
+        if self.autostart_checkbox is not None:
+            self.autostart_checkbox.setText(self.tr("autostart"))
+            self.autostart_checkbox.updateGeometry()
+
+        if self._status_key:
+            self._set_status(
+                self.tr(self._status_key, **self._status_params),
+                error=self._status_is_error,
+            )
+
+        self._update_measure_button()
+
+        if self.measure_action is not None:
+            self.measure_action.setText(self.tr("measure"))
+        if self.theme_action is not None:
+            self.theme_action.setText(self.tr("dark_theme"))
+        if self.autostart_action is not None:
+            self.autostart_action.setText(self.tr("autostart"))
+        if self.quit_action is not None:
+            self.quit_action.setText(self.tr("quit"))
 
     @staticmethod
     def _build_palette(dark):
@@ -610,6 +769,14 @@ class NetworkSpeedWindow(QWidget):
         header.addWidget(title)
         header.addStretch(1)
 
+        self.language_button = QPushButton()
+        self.language_button.setObjectName("languageButton")
+        self.language_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.language_button.setFlat(True)
+        self.language_button.setFixedSize(32, 32)
+        self.language_button.clicked.connect(self._toggle_language)
+        header.addWidget(self.language_button)
+
         self.theme_button = QPushButton()
         self.theme_button.setObjectName("themeButton")
         self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -620,9 +787,9 @@ class NetworkSpeedWindow(QWidget):
         header.addWidget(self.theme_button)
         root.addLayout(header)
 
-        subtitle = QLabel("Проверка скорости интернет-соединения")
-        subtitle.setObjectName("subtitle")
-        root.addWidget(subtitle)
+        self.subtitle_label = QLabel(self.tr("subtitle"))
+        self.subtitle_label.setObjectName("subtitle")
+        root.addWidget(self.subtitle_label)
         root.addSpacing(4)
 
         # Speed card: download | upload
@@ -631,12 +798,12 @@ class NetworkSpeedWindow(QWidget):
         metrics_row = QHBoxLayout(metrics)
         metrics_row.setContentsMargins(20, 18, 20, 18)
         metrics_row.setSpacing(18)
-        self.download_value = self._add_metric(metrics_row, "Загрузка ↓")
+        self.download_value = self._add_metric(metrics_row, "download")
         divider = QFrame()
         divider.setObjectName("divider")
         divider.setFixedWidth(1)
         metrics_row.addWidget(divider)
-        self.upload_value = self._add_metric(metrics_row, "Выгрузка ↑")
+        self.upload_value = self._add_metric(metrics_row, "upload")
         root.addWidget(metrics)
 
         # Details card: IP + location
@@ -646,40 +813,44 @@ class NetworkSpeedWindow(QWidget):
         grid.setContentsMargins(20, 14, 20, 14)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
-        self.ip_value = self._add_row(grid, 0, "IP-адрес")
+        self.ip_value = self._add_row(grid, 0, "ip")
         self.provider_value = self._add_row(
-            grid, 1, "Провайдер", fit=True
+            grid, 1, "provider", fit=True
         )
         self.location_value = self._add_row(
-            grid, 2, "Расположение", fit=True
+            grid, 2, "location", fit=True
         )
-        self.ping_value = self._add_row(grid, 3, "Пинг")
+        self.ping_value = self._add_row(grid, 3, "ping")
         grid.setColumnStretch(1, 1)
         root.addWidget(details)
 
-        self.autostart_checkbox = QCheckBox("Запускать при входе в Windows")
+        self.autostart_checkbox = QCheckBox(self.tr("autostart"))
         self.autostart_checkbox.setObjectName("autostart")
         self.autostart_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.autostart_checkbox.setChecked(self._autostart_on)
         self.autostart_checkbox.setVisible(autostart_supported())
+        # Keep the clickable area exactly around the indicator and text.
+        self.autostart_checkbox.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         self.autostart_checkbox.toggled.connect(self._set_autostart)
         root.addWidget(self.autostart_checkbox)
 
-        self.status = QLabel("Готово к проверке")
+        self.status = QLabel(self.tr("ready"))
         self.status.setObjectName("status")
         self.status.setWordWrap(True)
         root.addWidget(self.status)
 
-        self.button = QPushButton(MEASURE_TEXT)
+        self.button = QPushButton(self.tr("measure"))
         self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.setDefault(True)
         self.button.clicked.connect(self.start_measurement)
         root.addWidget(self.button)
 
-    def _add_metric(self, parent_layout, name):
+    def _add_metric(self, parent_layout, name_key):
         column = QVBoxLayout()
         column.setSpacing(2)
-        name_label = QLabel(name.upper())
+        name_label = QLabel(self.tr(name_key).upper())
         name_label.setObjectName("metricName")
         value = QLabel(EMPTY_VALUE)
         value.setObjectName("metricValue")
@@ -689,10 +860,12 @@ class NetworkSpeedWindow(QWidget):
         column.addWidget(value)
         column.addWidget(unit)
         parent_layout.addLayout(column, 1)
+        self.metric_name_labels.append(name_label)
+        self.metric_name_keys.append(name_key)
         return value
 
     def _add_row(self, grid, row, key, fit=False):
-        key_label = QLabel(key)
+        key_label = QLabel(self.tr(key))
         key_label.setObjectName("rowKey")
         # Keep the key column from squeezing the value column on wide fonts.
         key_label.setMaximumWidth(110)
@@ -708,6 +881,8 @@ class NetworkSpeedWindow(QWidget):
         )
         grid.addWidget(key_label, row, 0)
         grid.addWidget(value_label, row, 1)
+        self.row_key_labels.append(key_label)
+        self.row_key_keys.append(key)
         return value_label
 
     def _ensure_height(self):
@@ -732,21 +907,23 @@ class NetworkSpeedWindow(QWidget):
         self.tray.setToolTip(APP_NAME)
 
         self.tray_menu = QMenu()
-        measure_action = self.tray_menu.addAction(MEASURE_TEXT)
-        measure_action.triggered.connect(self._measure_from_tray)
+        self.measure_action = self.tray_menu.addAction(self.tr("measure"))
+        self.measure_action.triggered.connect(self._measure_from_tray)
         self.tray_menu.addSeparator()
-        self.theme_action = self.tray_menu.addAction("Тёмная тема")
+        self.theme_action = self.tray_menu.addAction(self.tr("dark_theme"))
         self.theme_action.setCheckable(True)
         self.theme_action.setChecked(self._dark)
         self.theme_action.toggled.connect(self.set_theme)
-        self.autostart_action = self.tray_menu.addAction("Автозапуск")
+        self.autostart_action = self.tray_menu.addAction(
+            self.tr("autostart")
+        )
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self._autostart_on)
         self.autostart_action.setVisible(autostart_supported())
         self.autostart_action.toggled.connect(self._set_autostart)
         self.tray_menu.addSeparator()
-        quit_action = self.tray_menu.addAction("Выход")
-        quit_action.triggered.connect(self.quit_app)
+        self.quit_action = self.tray_menu.addAction(self.tr("quit"))
+        self.quit_action.triggered.connect(self.quit_app)
 
         self.tray.setContextMenu(self.tray_menu)
         self._apply_tray_menu_theme()
@@ -776,6 +953,23 @@ class NetworkSpeedWindow(QWidget):
         if self.tray is not None:
             self.tray.setToolTip(f"{APP_NAME} — {text}")
 
+    def _update_tray_tooltip(self):
+        if self.tray is None:
+            return
+        running = self._worker is not None and self._worker.isRunning()
+        if running:
+            self._set_tray_tooltip(self.tr("tray_measuring"))
+        elif self._tray_error:
+            self._set_tray_tooltip(self.tr("tray_error"))
+        elif self._last_speed is not None:
+            download, upload, ping = self._last_speed
+            text = f"↓ {download:.2f} ↑ {upload:.2f} Mbit/s"
+            if isinstance(ping, (int, float)):
+                text += f" · {ping:.0f} ms"
+            self._set_tray_tooltip(text)
+        else:
+            self.tray.setToolTip(APP_NAME)
+
     def closeEvent(self, event):
         if self._quitting or self.tray is None:
             event.accept()
@@ -785,7 +979,7 @@ class NetworkSpeedWindow(QWidget):
         if not self._tray_message_shown:
             self.tray.showMessage(
                 APP_NAME,
-                "Приложение свёрнуто в трей и продолжает работать.",
+                self.tr("tray_message"),
                 QSystemTrayIcon.MessageIcon.Information,
                 2500,
             )
@@ -800,13 +994,13 @@ class NetworkSpeedWindow(QWidget):
             self._autostart_on = enabled
             self._sync_autostart_controls(enabled)
             if not (self._worker is not None and self._worker.isRunning()):
-                self._set_status(
-                    "Автозапуск включён" if enabled else "Автозапуск выключен"
+                self._set_status_key(
+                    "autostart_on" if enabled else "autostart_off"
                 )
         else:
             self._autostart_on = is_autostart_enabled()
             self._sync_autostart_controls(self._autostart_on)
-            self._set_status("Не удалось изменить автозапуск", error=True)
+            self._set_status_key("autostart_error", error=True)
 
     def _sync_autostart_controls(self, enabled):
         for widget in (self.autostart_checkbox, self.autostart_action):
@@ -817,6 +1011,11 @@ class NetworkSpeedWindow(QWidget):
             widget.blockSignals(False)
 
     # --- Measurement ------------------------------------------------------
+
+    def _set_status_key(self, key, error=False, **params):
+        self._status_key = key
+        self._status_params = params
+        self._set_status(self.tr(key, **params), error=error)
 
     def _set_status(self, text, error=False):
         self._status_is_error = bool(error)
@@ -840,9 +1039,11 @@ class NetworkSpeedWindow(QWidget):
             return
 
         self.button.setEnabled(False)
-        self.button.setText(MEASURE_BUSY_TEXT)
-        self._set_status("Измерение скорости и сбор данных…")
-        self._set_tray_tooltip(MEASURE_TOOLTIP)
+        self.button.setText(self.tr("measuring"))
+        self._set_status_key("measuring_status")
+        self._last_speed = None
+        self._tray_error = False
+        self._set_tray_tooltip(self.tr("tray_measuring"))
         self._clear_values()
 
         self._worker = MeasurementWorker()
@@ -856,18 +1057,16 @@ class NetworkSpeedWindow(QWidget):
             download_speed, upload_speed = speed
             self.download_value.setText(f"{download_speed:.2f}")
             self.upload_value.setText(f"{upload_speed:.2f}")
-            self._set_status("Проверка завершена")
-
-            tooltip = (
-                f"↓ {download_speed:.2f} ↑ {upload_speed:.2f} Mbit/s"
-            )
-            if isinstance(ping, (int, float)):
-                tooltip += f" · {ping:.0f} ms"
-            self._set_tray_tooltip(tooltip)
+            self._set_status_key("complete")
+            self._last_speed = (download_speed, upload_speed, ping)
+            self._tray_error = False
+            self._update_tray_tooltip()
         else:
             self._clear_values()
-            self._set_status(f"Не удалось измерить скорость: {speed}", error=True)
-            self._set_tray_tooltip("ошибка измерения")
+            self._set_status_key("speed_error", speed=speed, error=True)
+            self._last_speed = None
+            self._tray_error = True
+            self._update_tray_tooltip()
 
         self.ip_value.setText(str(results.get("ip") or EMPTY_VALUE))
         self.provider_value.setText(
@@ -883,7 +1082,7 @@ class NetworkSpeedWindow(QWidget):
             self.ping_value.setText(str(ping) if ping else EMPTY_VALUE)
 
         self.button.setEnabled(True)
-        self.button.setText(MEASURE_TEXT)
+        self.button.setText(self.tr("measure"))
         self._ensure_height()
 
     def quit_app(self):
@@ -893,7 +1092,7 @@ class NetworkSpeedWindow(QWidget):
         worker = self._worker
         if worker is not None and worker.isRunning():
             worker.cancel()
-            self._set_status("Завершение…")
+            self._set_status_key("finishing")
             QApplication.instance().processEvents()
             if not worker.wait(1000):
                 # A blocking request cannot be interrupted instantly. Wait for
