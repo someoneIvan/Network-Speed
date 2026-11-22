@@ -7,6 +7,23 @@ from PyQt6.QtWidgets import QApplication
 from gui import APP_NAME, NetworkSpeedWindow, create_app_icon
 from network import collect_results
 
+# Windows groups taskbar buttons by this identifier. Without it the taskbar can
+# fall back to the icon of python.exe/pythonw.exe instead of the window icon.
+APP_USER_MODEL_ID = "NetworkSpeed.App"
+
+
+def _set_windows_app_id():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            APP_USER_MODEL_ID
+        )
+    except (AttributeError, OSError):
+        pass
+
 
 def run_cli():
     results = collect_results()
@@ -26,8 +43,11 @@ def main():
         run_cli()
         return
 
+    _set_windows_app_id()
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
 
     icon = create_app_icon()
     app.setWindowIcon(icon)

@@ -22,6 +22,15 @@ GEO_URL = "https://ipwho.is/"
 CHUNK_SIZE = 64 * 1024
 
 
+class MeasurementCancelled(Exception):
+    """Raised internally when a measurement is cancelled."""
+
+
+def _check_cancelled(cancel):
+    if cancel is not None and cancel():
+        raise MeasurementCancelled
+
+
 def _error_text(exc, prefix="Unavailable"):
     return f"{prefix} ({exc.__class__.__name__})"
 
@@ -38,8 +47,9 @@ def _to_mbit(byte_count, elapsed, phase):
     return byte_count * 8 / elapsed / 1_000_000
 
 
-def _measure_download(session):
+def _measure_download(session, cancel=None):
     """Measure download speed in Mbit/s, downloading for at most MEASURE_SECONDS."""
+    _check_cancelled(cancel)
     with session.get(
         DOWNLOAD_URL,
         params={"bytes": DOWNLOAD_BYTES},
@@ -53,40 +63,45 @@ def _measure_download(session):
             received += len(chunk)
             if time.perf_counter() - started >= MEASURE_SECONDS:
                 break
+            _check_cancelled(cancel)
         elapsed = time.perf_counter() - started
 
     return _to_mbit(received, elapsed, "download")
 
 
-def _measure_upload(session):
+def _measure_upload(session, cancel=None):
     """Measure upload speed in Mbit/s."""
+    _check_cancelled(cancel)
     payload = b"\0" * UPLOAD_BYTES
     started = time.perf_counter()
     response = session.post(UPLOAD_URL, data=payload, timeout=TIMEOUT)
     elapsed = time.perf_counter() - started
     response.raise_for_status()
+    _check_cancelled(cancel)
 
     return _to_mbit(UPLOAD_BYTES, elapsed, "upload")
 
 
-def measure_speed():
+def measure_speed(cancel=None):
     """Return (download, upload) in Mbit/s. Raises on failure."""
     # One session for both phases reuses the TLS connection to Cloudflare
     # instead of paying for a second handshake before the upload.
     with requests.Session() as session:
-        download_speed = _measure_download(session)
-        upload_speed = _measure_upload(session)
+        download_speed = _measure_download(session, cancel)
+        upload_speed = _measure_upload(session, cancel)
     return download_speed, upload_speed
 
 
-def get_ip():
+def get_ip(cancel=None):
+    _check_cancelled(cancel)
     try:
         return _get(IP_URL).text.strip()
     except requests.RequestException as exc:
         return _error_text(exc)
 
 
-def get_location():
+def get_location(cancel=None):
+    _check_cancelled(cancel)
     try:
         data = _get(GEO_URL).json()
         if not data.get("success"):
@@ -96,12 +111,12 @@ def get_location():
         return _error_text(exc, "Unknown")
 
 
-def collect_results():
+def collect_results(cancel=None):
     """Run every check concurrently and return a result payload."""
     with ThreadPoolExecutor(max_workers=3) as executor:
-        speed_future = executor.submit(measure_speed)
-        ip_future = executor.submit(get_ip)
-        location_future = executor.submit(get_location)
+        speed_future = executor.submit(measure_speed, cancel)
+        ip_future = executor.submit(get_ip, cancel)
+        location_future = executor.submit(get_location, cancel)
 
         try:
             speed = speed_future.result()

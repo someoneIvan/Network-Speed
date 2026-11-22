@@ -1,7 +1,18 @@
 """Minimal PyQt6 interface for the network speed app."""
 
-from PyQt6.QtCore import QPointF, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap, QPolygonF
+import math
+import sys
+
+from PyQt6.QtCore import QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import (
+    QColor,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,7 +29,14 @@ from PyQt6.QtWidgets import (
 
 from autostart import autostart_supported, is_autostart_enabled, set_autostart
 from network import collect_results
-from styles import ERROR_TEXT_STYLE, STYLESHEET
+from styles import (
+    DARK_MENU_STYLESHEET,
+    DARK_STYLESHEET,
+    ERROR_TEXT_STYLE,
+    ERROR_TEXT_STYLE_LIGHT,
+    LIGHT_MENU_STYLESHEET,
+    LIGHT_STYLESHEET,
+)
 
 APP_NAME = "Network Speed"
 EMPTY_VALUE = "—"
@@ -26,21 +44,32 @@ MEASURE_TEXT = "Проверить скорость"
 MEASURE_BUSY_TEXT = "Измерение…"
 MEASURE_TOOLTIP = "измерение…"
 
+# The icon is rendered once at a large size and smoothly downsampled to every
+# size Qt asks for. Rendering each small size directly makes the bolt look
+# pixelated and clips the disc at the right/bottom edges.
+ICON_MASTER_SIZE = 1024
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
-def _icon_pixmap(size):
-    """Draw a minimal dark disc with a white bolt."""
+
+def _render_icon_master():
+    """Render a high-resolution disc with a white bolt."""
+    size = ICON_MASTER_SIZE
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
     painter.setPen(Qt.PenStyle.NoPen)
 
+    scale = size / 100
+    # Keep a small transparent margin so the disc is never clipped.
     painter.setBrush(QColor("#16181d"))
-    painter.drawEllipse(0, 0, size, size)
+    painter.drawEllipse(
+        QPointF(50 * scale, 50 * scale), 48 * scale, 48 * scale
+    )
 
     bolt = [(60, 6), (28, 55), (47, 55), (40, 94), (76, 41), (54, 41)]
-    scale = size / 100
     painter.setBrush(QColor("#ffffff"))
     painter.drawPolygon(
         QPolygonF([QPointF(x * scale, y * scale) for x, y in bolt])
@@ -49,10 +78,90 @@ def _icon_pixmap(size):
     return pixmap
 
 
+def _icon_pixmap(size, master=None):
+    """Return a crisp icon of the requested size."""
+    if master is None:
+        master = _render_icon_master()
+    return master.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+
+
 def create_app_icon():
+    master = _render_icon_master()
+    icon = QIcon()
+    for size in ICON_SIZES:
+        icon.addPixmap(_icon_pixmap(size, master))
+    return icon
+
+
+def _theme_icon_pixmap(dark):
+    """Draw a sun (dark mode) or a crescent moon (light mode)."""
+    size = 128
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    color = QColor("#f5f7fa") if dark else QColor("#16181d")
+
+    center = QPointF(size / 2, size / 2)
+    if dark:
+        # Sun: click to switch to the light theme.
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, size * 0.055))
+        radius = size * 0.16
+        painter.drawEllipse(center, radius, radius)
+        for index in range(8):
+            angle = index * math.pi / 4
+            inner = size * 0.28
+            outer = size * 0.39
+            painter.drawLine(
+                QPointF(
+                    center.x() + inner * math.cos(angle),
+                    center.y() + inner * math.sin(angle),
+                ),
+                QPointF(
+                    center.x() + outer * math.cos(angle),
+                    center.y() + outer * math.sin(angle),
+                ),
+            )
+    else:
+        # Crescent moon: click to switch to the dark theme.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(
+            QPointF(size * 0.46, size * 0.5), size * 0.32, size * 0.32
+        )
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_Clear
+        )
+        painter.drawEllipse(
+            QPointF(size * 0.62, size * 0.46), size * 0.30, size * 0.30
+        )
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceOver
+        )
+
+    painter.end()
+    return pixmap
+
+
+def _theme_icon(dark):
+    master = _theme_icon_pixmap(dark)
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128):
-        icon.addPixmap(_icon_pixmap(size))
+        icon.addPixmap(
+            master.scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
     return icon
 
 
@@ -61,8 +170,26 @@ class MeasurementWorker(QThread):
 
     results_ready = pyqtSignal(object)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
     def run(self):
-        self.results_ready.emit(collect_results())
+        try:
+            results = collect_results(cancel=lambda: self._cancelled)
+        except Exception as exc:
+            if self._cancelled:
+                return
+            # Keep the UI responsive on unexpected errors.
+            results = {
+                "speed": f"Unavailable ({exc.__class__.__name__})",
+                "ip": EMPTY_VALUE,
+                "location": EMPTY_VALUE,
+            }
+        self.results_ready.emit(results)
 
 
 class NetworkSpeedWindow(QWidget):
@@ -72,20 +199,143 @@ class NetworkSpeedWindow(QWidget):
         self._quitting = False
         self._tray_message_shown = False
         self._autostart_on = is_autostart_enabled()
+        self._dark = True
+        self._status_is_error = False
         self.tray = None
         self.tray_menu = None
         self.autostart_checkbox = None
         self.autostart_action = None
+        self.theme_action = None
+        self.theme_button = None
 
         self.icon = icon or create_app_icon()
         self.setWindowIcon(self.icon)
         self.setObjectName("root")
         self.setWindowTitle(APP_NAME)
         self.setFixedWidth(360)
-        self.setStyleSheet(STYLESHEET)
+        self.setStyleSheet(DARK_STYLESHEET)
+        self._apply_palette(dark=True)
 
         self._build_ui()
         self._setup_tray()
+        self._update_theme_button()
+        self._apply_dark_titlebar()
+
+    # --- Theme ------------------------------------------------------------
+
+    def _apply_dark_titlebar(self):
+        """Make the Windows title bar match the selected theme."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            value = wintypes.BOOL(self._dark)
+            dwmapi = ctypes.windll.dwmapi
+            # 20 works on Windows 10 2004+ and Windows 11; 19 on older
+            # Windows 10 builds. Ignore the result on unsupported systems.
+            for attribute in (20, 19):
+                result = dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)
+                )
+                if result == 0:
+                    return
+        except (AttributeError, OSError):
+            pass
+
+    def _apply_tray_menu_theme(self):
+        """Style the tray menu explicitly (it does not inherit the window QSS)."""
+        if self.tray_menu is None:
+            return
+        self.tray_menu.setStyleSheet(
+            DARK_MENU_STYLESHEET if self._dark else LIGHT_MENU_STYLESHEET
+        )
+        self.tray_menu.setPalette(self._build_palette(self._dark))
+        self.tray_menu.update()
+
+    def _toggle_theme(self):
+        self.set_theme(not self._dark)
+
+    def _update_theme_button(self):
+        if self.theme_button is None:
+            return
+        self.theme_button.setIcon(_theme_icon(self._dark))
+        self.theme_button.setToolTip(
+            "Включить светлую тему" if self._dark else "Включить тёмную тему"
+        )
+        self.theme_button.setAccessibleName(self.theme_button.toolTip())
+
+    @staticmethod
+    def _build_palette(dark):
+        palette = QPalette()
+        if dark:
+            window = QColor("#0f1115")
+            text = QColor("#f5f7fa")
+            base = QColor("#1a1d24")
+            button = QColor("#1a1d24")
+            muted = QColor("#9aa3b2")
+            tooltip = QColor("#1a1d24")
+        else:
+            window = QColor("#f4f5f7")
+            text = QColor("#16181d")
+            base = QColor("#ffffff")
+            button = QColor("#f4f5f7")
+            muted = QColor("#5c626b")
+            tooltip = QColor("#ffffdc")
+
+        highlight = QColor("#3b82f6")
+        palette.setColor(QPalette.ColorRole.Window, window)
+        palette.setColor(QPalette.ColorRole.WindowText, text)
+        palette.setColor(QPalette.ColorRole.Base, base)
+        palette.setColor(QPalette.ColorRole.AlternateBase, base)
+        palette.setColor(QPalette.ColorRole.Text, text)
+        palette.setColor(QPalette.ColorRole.Button, button)
+        palette.setColor(QPalette.ColorRole.ButtonText, text)
+        palette.setColor(QPalette.ColorRole.Highlight, highlight)
+        palette.setColor(
+            QPalette.ColorRole.HighlightedText, QColor("#ffffff")
+        )
+        palette.setColor(QPalette.ColorRole.ToolTipBase, tooltip)
+        palette.setColor(QPalette.ColorRole.ToolTipText, text)
+        palette.setColor(QPalette.ColorRole.PlaceholderText, muted)
+        palette.setColor(
+            QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, muted
+        )
+        palette.setColor(
+            QPalette.ColorGroup.Disabled,
+            QPalette.ColorRole.ButtonText,
+            muted,
+        )
+        return palette
+
+    def _apply_palette(self, dark):
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(self._build_palette(dark))
+
+    def set_theme(self, dark):
+        """Switch between the dark and light interface themes."""
+        self._dark = bool(dark)
+        self.setStyleSheet(
+            DARK_STYLESHEET if self._dark else LIGHT_STYLESHEET
+        )
+        self._apply_palette(self._dark)
+        self._apply_dark_titlebar()
+        self._apply_tray_menu_theme()
+        self._update_theme_button()
+        if self._status_is_error:
+            self._set_status(self.status.text(), error=True)
+        if self.theme_action is not None:
+            self.theme_action.blockSignals(True)
+            self.theme_action.setChecked(self._dark)
+            self.theme_action.blockSignals(False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The native title bar exists only after the window is shown.
+        self._apply_dark_titlebar()
 
     # --- Layout -----------------------------------------------------------
 
@@ -100,11 +350,27 @@ class NetworkSpeedWindow(QWidget):
         root.setContentsMargins(26, 24, 26, 24)
         root.setSpacing(14)
 
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
         title = QLabel(APP_NAME)
         title.setObjectName("title")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.theme_button = QPushButton()
+        self.theme_button.setObjectName("themeButton")
+        self.theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.theme_button.setFlat(True)
+        self.theme_button.setFixedSize(32, 32)
+        self.theme_button.setIconSize(QSize(20, 20))
+        self.theme_button.clicked.connect(self._toggle_theme)
+        header.addWidget(self.theme_button)
+        root.addLayout(header)
+
         subtitle = QLabel("Проверка скорости интернет-соединения")
         subtitle.setObjectName("subtitle")
-        root.addWidget(title)
         root.addWidget(subtitle)
         root.addSpacing(4)
 
@@ -142,6 +408,7 @@ class NetworkSpeedWindow(QWidget):
 
         self.status = QLabel("Готово к проверке")
         self.status.setObjectName("status")
+        self.status.setWordWrap(True)
         root.addWidget(self.status)
 
         self.button = QPushButton(MEASURE_TEXT)
@@ -173,6 +440,7 @@ class NetworkSpeedWindow(QWidget):
         value_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        value_label.setWordWrap(True)
         value_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -190,11 +458,13 @@ class NetworkSpeedWindow(QWidget):
         self.tray.setToolTip(APP_NAME)
 
         self.tray_menu = QMenu()
-        show_action = self.tray_menu.addAction("Показать окно")
-        show_action.triggered.connect(self.show_window)
         measure_action = self.tray_menu.addAction(MEASURE_TEXT)
         measure_action.triggered.connect(self._measure_from_tray)
         self.tray_menu.addSeparator()
+        self.theme_action = self.tray_menu.addAction("Тёмная тема")
+        self.theme_action.setCheckable(True)
+        self.theme_action.setChecked(self._dark)
+        self.theme_action.toggled.connect(self.set_theme)
         self.autostart_action = self.tray_menu.addAction("Автозапуск")
         self.autostart_action.setCheckable(True)
         self.autostart_action.setChecked(self._autostart_on)
@@ -205,6 +475,7 @@ class NetworkSpeedWindow(QWidget):
         quit_action.triggered.connect(self.quit_app)
 
         self.tray.setContextMenu(self.tray_menu)
+        self._apply_tray_menu_theme()
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
@@ -274,7 +545,9 @@ class NetworkSpeedWindow(QWidget):
     # --- Measurement ------------------------------------------------------
 
     def _set_status(self, text, error=False):
-        self.status.setStyleSheet(ERROR_TEXT_STYLE if error else "")
+        self._status_is_error = bool(error)
+        error_style = ERROR_TEXT_STYLE if self._dark else ERROR_TEXT_STYLE_LIGHT
+        self.status.setStyleSheet(error_style if error else "")
         self.status.setText(text)
 
     def _clear_values(self):
@@ -322,11 +595,30 @@ class NetworkSpeedWindow(QWidget):
         self.button.setText(MEASURE_TEXT)
 
     def quit_app(self):
+        if self._quitting:
+            return
         self._quitting = True
-        if self._worker is not None and self._worker.isRunning():
-            if not self._worker.wait(1500):
-                self._worker.terminate()
-                self._worker.wait()
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            self._set_status("Завершение…")
+            QApplication.instance().processEvents()
+            if not worker.wait(1000):
+                # A blocking request cannot be interrupted instantly. Wait for
+                # the worker instead of terminating a running Python thread.
+                self._wait_for_worker(worker)
+                return
+        self._worker = None
+        self._finalize_quit()
+
+    def _wait_for_worker(self, worker):
+        if worker.isRunning():
+            QTimer.singleShot(100, lambda: self._wait_for_worker(worker))
+            return
+        self._worker = None
+        self._finalize_quit()
+
+    def _finalize_quit(self):
         if self.tray is not None:
             self.tray.hide()
         QApplication.instance().quit()
