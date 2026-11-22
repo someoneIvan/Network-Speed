@@ -7,6 +7,7 @@ from PyQt6.QtCore import (
     QPointF,
     QRect,
     QRectF,
+    QSettings,
     QSize,
     Qt,
     QThread,
@@ -538,12 +539,16 @@ class ThemedCheckBox(QCheckBox):
             )
             or 8
         )
-        indicator = QRect(
-            self.rect().left() + 4,
-            self.rect().center().y() - indicator_h // 2,
-            indicator_w,
-            indicator_h,
+        indicator = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator, opt, self
         )
+        if indicator.isNull():
+            indicator = QRect(
+                self.rect().left() + 4,
+                self.rect().center().y() - indicator_h // 2,
+                indicator_w,
+                indicator_h,
+            )
 
         radius = max(3.0, indicator.width() * 0.24)
         if self.isChecked():
@@ -634,14 +639,24 @@ class MeasurementWorker(QThread):
 
 
 class NetworkSpeedWindow(QWidget):
-    def __init__(self, icon=None):
+    def __init__(self, icon=None, settings=None):
         super().__init__()
+        self._settings = settings or QSettings(
+            "NetworkSpeed", "NetworkSpeed"
+        )
+        stored_dark = self._settings.value("dark", True, type=bool)
+        stored_lang = self._settings.value(
+            "language", DEFAULT_LANGUAGE
+        )
+        if not isinstance(stored_lang, str) or stored_lang not in TRANSLATIONS:
+            stored_lang = DEFAULT_LANGUAGE
+
         self._worker = None
         self._quitting = False
         self._tray_message_shown = False
         self._autostart_on = is_autostart_enabled()
-        self._dark = True
-        self._lang = DEFAULT_LANGUAGE
+        self._dark = bool(stored_dark)
+        self._lang = stored_lang
         self._status_is_error = False
         self._status_key = "ready"
         self._status_params = {}
@@ -671,8 +686,10 @@ class NetworkSpeedWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle(APP_NAME)
         self.setFixedWidth(360)
-        self.setStyleSheet(DARK_STYLESHEET)
-        self._apply_palette(dark=True)
+        self.setStyleSheet(
+            DARK_STYLESHEET if self._dark else LIGHT_STYLESHEET
+        )
+        self._apply_palette(dark=self._dark)
 
         self._build_ui()
         self._setup_tray()
@@ -767,6 +784,8 @@ class NetworkSpeedWindow(QWidget):
         if lang not in TRANSLATIONS or lang == self._lang:
             return
         self._lang = lang
+        self._settings.setValue("language", self._lang)
+        self._settings.sync()
         self._retranslate_ui()
         self._update_language_button()
         self._update_theme_button()
@@ -864,10 +883,14 @@ class NetworkSpeedWindow(QWidget):
         self._apply_dark_titlebar()
         self._apply_tray_menu_theme()
         self._update_theme_button()
+        self._settings.setValue("dark", self._dark)
+        self._settings.sync()
         if self.autostart_checkbox is not None:
             self.autostart_checkbox.set_dark(self._dark)
         if self.location_value is not None:
             self.location_value.refresh()
+        if self.provider_value is not None:
+            self.provider_value.refresh()
         self._ensure_height()
         if self._status_is_error:
             self._set_status(self.status.text(), error=True)
@@ -961,6 +984,7 @@ class NetworkSpeedWindow(QWidget):
         root.addWidget(details)
 
         self.autostart_checkbox = ThemedCheckBox(self.tr("autostart"))
+        self.autostart_checkbox.set_dark(self._dark)
         self.autostart_checkbox.setObjectName("autostart")
         self.autostart_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
         self.autostart_checkbox.setChecked(self._autostart_on)
@@ -1011,9 +1035,14 @@ class NetworkSpeedWindow(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         value_label.setWordWrap(True)
-        value_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
+        if fit:
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.NoTextInteraction
+            )
+        else:
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
         grid.addWidget(key_label, row, 0)
         grid.addWidget(value_label, row, 1)
         self.row_key_labels.append(key_label)
@@ -1021,15 +1050,19 @@ class NetworkSpeedWindow(QWidget):
         return value_label
 
     def _ensure_height(self):
-        """Grow the window when wrapped content needs more vertical space."""
+        """Fit the window height to the current content."""
+        if self.layout() is not None:
+            self.layout().activate()
         for card in (self.metrics_card, self.details_card):
             if card is None:
                 continue
             needed = card.sizeHint().height()
             if card.minimumHeight() != needed:
                 card.setMinimumHeight(needed)
-        required = self.sizeHint().height()
-        if self.height() < required:
+        required = max(
+            self.sizeHint().height(), self.minimumSizeHint().height()
+        )
+        if self.height() != required:
             self.resize(self.width(), required)
 
     # --- Tray -------------------------------------------------------------
@@ -1219,6 +1252,8 @@ class NetworkSpeedWindow(QWidget):
         self.button.setEnabled(True)
         self.button.setText(self.tr("measure"))
         self._ensure_height()
+        # Re-check after the layout has settled so the window can shrink back.
+        QTimer.singleShot(0, self._ensure_height)
 
     def quit_app(self):
         if self._quitting:

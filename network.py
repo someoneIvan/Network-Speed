@@ -11,6 +11,8 @@ CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 15
 MEASURE_SECONDS = 10.0
 TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+# Uploads can legitimately be slow; give the 10 MB payload more time.
+UPLOAD_TIMEOUT = (CONNECT_TIMEOUT, 60)
 
 DOWNLOAD_URL = "https://speed.cloudflare.com/__down"
 UPLOAD_URL = "https://speed.cloudflare.com/__up"
@@ -53,33 +55,58 @@ def _to_mbit(byte_count, elapsed, phase):
 
 
 def _measure_download(session, cancel=None):
-    """Measure download speed in Mbit/s, downloading for at most MEASURE_SECONDS."""
+    """Measure download speed in Mbit/s for up to MEASURE_SECONDS."""
     _check_cancelled(cancel)
-    with session.get(
-        DOWNLOAD_URL,
-        params={"bytes": DOWNLOAD_BYTES},
-        stream=True,
-        timeout=TIMEOUT,
-    ) as response:
-        response.raise_for_status()
-        started = time.perf_counter()
-        received = 0
-        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-            received += len(chunk)
-            if time.perf_counter() - started >= MEASURE_SECONDS:
-                break
-            _check_cancelled(cancel)
-        elapsed = time.perf_counter() - started
+    started = time.perf_counter()
+    received = 0
 
+    while True:
+        _check_cancelled(cancel)
+        with session.get(
+            DOWNLOAD_URL,
+            params={"bytes": DOWNLOAD_BYTES},
+            stream=True,
+            timeout=TIMEOUT,
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                received += len(chunk)
+                if time.perf_counter() - started >= MEASURE_SECONDS:
+                    break
+                _check_cancelled(cancel)
+
+        if time.perf_counter() - started >= MEASURE_SECONDS:
+            break
+        # Avoid a tight loop if the server keeps returning empty bodies.
+        if received == 0:
+            break
+
+    elapsed = time.perf_counter() - started
+    if received == 0:
+        raise RuntimeError("download returned no data")
     return _to_mbit(received, elapsed, "download")
 
 
 def _measure_upload(session, cancel=None):
     """Measure upload speed in Mbit/s."""
     _check_cancelled(cancel)
+
+    # Warm up the upload path so the measured request does not include a new
+    # TLS handshake after the download phase.
+    try:
+        with session.post(
+            UPLOAD_URL, data=b"", timeout=UPLOAD_TIMEOUT
+        ) as response:
+            response.raise_for_status()
+    except requests.RequestException:
+        pass
+
+    _check_cancelled(cancel)
     payload = b"\0" * UPLOAD_BYTES
     started = time.perf_counter()
-    response = session.post(UPLOAD_URL, data=payload, timeout=TIMEOUT)
+    response = session.post(
+        UPLOAD_URL, data=payload, timeout=UPLOAD_TIMEOUT
+    )
     elapsed = time.perf_counter() - started
     response.raise_for_status()
     _check_cancelled(cancel)
@@ -157,6 +184,8 @@ def get_geo(cancel=None):
     _check_cancelled(cancel)
     try:
         data = _get(GEO_URL).json()
+        if not isinstance(data, dict):
+            return "Unknown", "Unknown"
         if not data.get("success"):
             return "Unknown", "Unknown"
 
@@ -186,26 +215,26 @@ def get_provider(cancel=None):
 
 
 def collect_results(cancel=None):
-    """Run every check concurrently and return a result payload."""
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        speed_future = executor.submit(measure_speed, cancel)
+    """Run every check and return a result payload."""
+    # Fetch the quick IP/geo data first. Running them next to the ping would
+    # inflate the measured latency.
+    with ThreadPoolExecutor(max_workers=2) as executor:
         ip_future = executor.submit(get_ip, cancel)
         geo_future = executor.submit(get_geo, cancel)
-
-        ping = "Unavailable"
-        try:
-            speed_result = speed_future.result()
-        except (requests.RequestException, RuntimeError) as exc:
-            speed = _error_text(exc)
-        else:
-            if isinstance(speed_result, tuple) and len(speed_result) == 3:
-                download, upload, ping = speed_result
-                speed = (download, upload)
-            else:
-                speed = speed_result
-
         ip = ip_future.result()
         location, provider = geo_future.result()
+
+    ping = "Unavailable"
+    try:
+        speed_result = measure_speed(cancel)
+    except (requests.RequestException, RuntimeError) as exc:
+        speed = _error_text(exc)
+    else:
+        if isinstance(speed_result, tuple) and len(speed_result) == 3:
+            download, upload, ping = speed_result
+            speed = (download, upload)
+        else:
+            speed = speed_result
 
     return {
         "speed": speed,
